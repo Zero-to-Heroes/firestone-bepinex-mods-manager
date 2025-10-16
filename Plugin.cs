@@ -25,7 +25,6 @@ namespace FirestoneBepinexModsManager
         {
             try
             {
-
                 // Plugin startup logic
                 Logger = base.Logger;
                 Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} is loaded!");
@@ -78,11 +77,17 @@ namespace FirestoneBepinexModsManager
             {
                 Logger.LogInfo($"Received WebSocket message: {message}");
                 var command = JsonConvert.DeserializeObject<ModCommand>(message);
+                Logger.LogInfo($"command: {command}, type: {command?.Type}");
 
                 switch (command.Type.ToLower())
                 {
                     case "toggle-mod":
-                        this.modToggler?.TogglePlugin(command.PluginPath);
+                        var toggleModCommand = JsonConvert.DeserializeObject<ToggleModCommand>(message);
+                        Logger.LogDebug($"toggle command: {command}, type: {command?.Type}, modNames: {toggleModCommand.modNames}");
+                        foreach (var plugin in toggleModCommand.modNames)
+                        {
+                            this.modToggler?.TogglePlugin(plugin);
+                        }
                         break;
                     case "get-plugins":
                         PublishModsInfo();
@@ -105,7 +110,6 @@ namespace FirestoneBepinexModsManager
         public class ModCommand
         {
             public string Type { get; set; }
-            public string PluginPath { get; set; }
         }
     }
 }

@@ -8,6 +8,7 @@ using BepInEx.Bootstrap;
 using BepInEx.Logging;
 using Newtonsoft.Json;
 using UnityEngine;
+using static FirestoneBepinexModsManager.Plugin;
 
 namespace FirestoneBepinexModsManager
 {
@@ -22,68 +23,71 @@ namespace FirestoneBepinexModsManager
             this.logger = logger;
             this.wsServer = wsServer;
             
-            // Register for application shutdown events
-            Application.quitting += OnApplicationQuitting;
+            // Note: Application.quitting is not available in all Unity versions
+            // Cleanup will be handled via OnDestroy() when the GameObject is destroyed
         }
 
-        public void TogglePlugin(string pluginPath)
+        public void TogglePlugin(string pluginName)
         {
+            logger.LogDebug($"TogglePlugin: {pluginName}");
             try
             {
-                var fullPath = Path.Combine(Paths.BepInExRootPath, "plugins", pluginPath);
+                var fullPath = Path.Combine(Paths.BepInExRootPath, "plugins", pluginName + ".dll");
                 
                 if (File.Exists(fullPath))
                 {
+                    logger.LogDebug($"Found plugin: {pluginName}, {fullPath}");
                     // Check if this plugin is currently loaded
                     var isLoaded = Chainloader.PluginInfos.Values.Any(p => 
                         p.Location.Equals(fullPath, StringComparison.OrdinalIgnoreCase));
+                    logger.LogDebug($"isLoaded: {isLoaded}");
                     
                     if (isLoaded)
                     {
                         // Cannot rename loaded DLL - schedule for shutdown processing
-                        SchedulePluginToggle(pluginPath, false);
-                        logger.LogWarning($"Plugin {pluginPath} is loaded and cannot be disabled until game shutdown");
+                        SchedulePluginToggle(pluginName, false);
+                        logger.LogWarning($"Plugin {pluginName} is loaded and cannot be disabled until game shutdown");
                         
-                        wsServer?.Broadcast($"{{ \"type\": \"plugin-scheduled\", \"plugin\": \"{pluginPath}\", \"active\": false, \"message\": \"Plugin scheduled for disable on game shutdown. File is currently locked.\" }}");
+                        wsServer?.Broadcast($"{{ \"type\": \"plugin-scheduled\", \"plugin\": \"{pluginName}\", \"active\": false, \"message\": \"Plugin scheduled for disable on game shutdown. File is currently locked.\" }}");
                     }
                     else
                     {
                         // Plugin file exists but not loaded - safe to rename
                         var disabledPath = fullPath + ".disabled";
                         File.Move(fullPath, disabledPath);
-                        logger.LogInfo($"Disabled plugin: {pluginPath}");
+                        logger.LogInfo($"Disabled plugin: {pluginName}");
                         
-                        wsServer?.Broadcast($"{{ \"type\": \"plugin-toggled\", \"plugin\": \"{pluginPath}\", \"active\": false, \"message\": \"Plugin disabled successfully.\" }}");
+                        wsServer?.Broadcast($"{{ \"type\": \"plugin-toggled\", \"plugin\": \"{pluginName}\", \"active\": false, \"message\": \"Plugin disabled successfully.\" }}");
                     }
                 }
                 else if (File.Exists(fullPath + ".disabled"))
                 {
                     // Disabled plugin - enable it (this should always work)
                     File.Move(fullPath + ".disabled", fullPath);
-                    logger.LogInfo($"Enabled plugin: {pluginPath}");
+                    logger.LogInfo($"Enabled plugin: {pluginName}");
                     
-                    wsServer?.Broadcast($"{{ \"type\": \"plugin-toggled\", \"plugin\": \"{pluginPath}\", \"active\": true, \"message\": \"Plugin enabled. Restart game to load it.\" }}");
+                    wsServer?.Broadcast($"{{ \"type\": \"plugin-toggled\", \"plugin\": \"{pluginName}\", \"active\": true, \"message\": \"Plugin enabled. Restart game to load it.\" }}");
                 }
                 else
                 {
-                    logger.LogError($"Plugin file not found: {pluginPath}");
-                    wsServer?.Broadcast($"{{ \"type\": \"error\", \"message\": \"Plugin file not found: {pluginPath}\" }}");
+                    logger.LogError($"Plugin file not found: {pluginName}, {fullPath}");
+                    wsServer?.Broadcast($"{{ \"type\": \"error\", \"message\": \"Plugin file not found: {pluginName}\" }}");
                 }
             }
             catch (UnauthorizedAccessException ex)
             {
-                logger.LogError($"Access denied when toggling plugin {pluginPath}: {ex.Message}");
+                logger.LogError($"Access denied when toggling plugin {pluginName}: {ex.Message}");
                 wsServer?.Broadcast($"{{ \"type\": \"error\", \"message\": \"Cannot modify plugin file - it may be locked by the game. Try restarting the game first.\" }}");
             }
             catch (IOException ex) when (ex.Message.Contains("being used by another process"))
             {
-                logger.LogError($"Plugin file is locked: {pluginPath}");
-                SchedulePluginToggle(pluginPath, false);
-                wsServer?.Broadcast($"{{ \"type\": \"plugin-scheduled\", \"plugin\": \"{pluginPath}\", \"active\": false, \"message\": \"Plugin file is locked. Scheduled for disable on game shutdown.\" }}");
+                logger.LogError($"Plugin file is locked: {pluginName}");
+                SchedulePluginToggle(pluginName, false);
+                wsServer?.Broadcast($"{{ \"type\": \"plugin-scheduled\", \"plugin\": \"{pluginName}\", \"active\": false, \"message\": \"Plugin file is locked. Scheduled for disable on game shutdown.\" }}");
             }
             catch (Exception ex)
             {
-                logger.LogError($"Error toggling plugin {pluginPath}: {ex.Message}");
+                logger.LogError($"Error toggling plugin {pluginName}: {ex.Message}");
                 wsServer?.Broadcast($"{{ \"type\": \"error\", \"message\": \"Error toggling plugin: {ex.Message}\" }}");
             }
         }
@@ -100,18 +104,83 @@ namespace FirestoneBepinexModsManager
             ProcessScheduledTogglesOnShutdown();
         }
 
-        private void OnApplicationQuitting()
-        {
-            logger?.LogInfo("Application is quitting - processing scheduled plugin toggles");
-            ProcessScheduledTogglesOnShutdown();
-        }
 
         private void ProcessScheduledTogglesOnShutdown()
         {
             if (scheduledToggles.Count == 0) return;
             
-            // Start a coroutine for delayed processing
-            StartCoroutine(ProcessTogglesWithDelay());
+            logger?.LogInfo($"Processing {scheduledToggles.Count} scheduled plugin toggles immediately...");
+            
+            // Process toggles immediately and synchronously to ensure they complete
+            // even if the game closes quickly
+            ProcessTogglesImmediately();
+            
+            // Also start the coroutine as backup (in case immediate processing fails)
+            try
+            {
+                StartCoroutine(ProcessTogglesWithDelay());
+            }
+            catch (Exception ex)
+            {
+                logger?.LogWarning($"Could not start coroutine for delayed processing: {ex.Message}");
+            }
+        }
+
+        private void ProcessTogglesImmediately()
+        {
+            var processedToggles = new List<string>();
+
+            foreach (var toggle in scheduledToggles.ToArray())
+            {
+                try
+                {
+                    var pluginPath = toggle.Key;
+                    var enable = toggle.Value;
+                    var fullPath = Path.Combine(Paths.BepInExRootPath, "plugins", pluginPath);
+
+                    bool success = false;
+                    if (enable)
+                    {
+                        // Enable: .disabled -> .dll
+                        if (File.Exists(fullPath + ".disabled"))
+                        {
+                            File.Move(fullPath + ".disabled", fullPath);
+                            logger?.LogInfo($"Immediately enabled scheduled plugin during shutdown: {pluginPath}");
+                            success = true;
+                        }
+                    }
+                    else
+                    {
+                        // Disable: .dll -> .disabled
+                        if (File.Exists(fullPath))
+                        {
+                            File.Move(fullPath, fullPath + ".disabled");
+                            logger?.LogInfo($"Immediately disabled scheduled plugin during shutdown: {pluginPath}");
+                            success = true;
+                        }
+                    }
+
+                    if (success)
+                    {
+                        processedToggles.Add(pluginPath);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger?.LogError($"Failed to immediately process scheduled toggle for {toggle.Key}: {ex.Message}");
+                }
+            }
+
+            // Remove successfully processed toggles
+            foreach (var processed in processedToggles)
+            {
+                scheduledToggles.Remove(processed);
+            }
+
+            if (processedToggles.Count > 0)
+            {
+                logger?.LogInfo($"Immediately processed {processedToggles.Count} scheduled plugin toggles");
+            }
         }
 
         private IEnumerator ProcessTogglesWithDelay()
@@ -208,5 +277,10 @@ namespace FirestoneBepinexModsManager
         {
             return new Dictionary<string, bool>(scheduledToggles);
         }
+    }
+
+    public class ToggleModCommand : ModCommand
+    {
+        public string[] modNames;
     }
 }
